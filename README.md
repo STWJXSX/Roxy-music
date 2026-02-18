@@ -186,9 +186,9 @@ Found a bug? Have a feature idea? Please open an issue on GitHub!
 ## 📧 Contact
 
 - Discord: [Join our server](https://discord.gg/SrSMRxfUEj)
-- GitHub: [@yourusername](https://github.com/yourusername)
+- GitHub: [@STWJXSX](https://github.com/STWJXSX)
 
 ---
 
-**Made with ❤️ by the Roxy Team**
+**Made with ❤️ by STWJXSX**
 
