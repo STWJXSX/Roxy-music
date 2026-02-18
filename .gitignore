@@ -1,0 +1,109 @@
+# Environment Variables (SENSITIVE)
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Node Modules
+node_modules/
+package-lock.json
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-workspace
+*.sublime-project
+
+# Logs
+logs/
+*.log
+
+# Runtime
+dist/
+build/
+out/
+
+# OS Files
+.DS_Store
+.AppleDouble
+.LSOverride
+*.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Data Files (Database backups, etc)
+data/*.json
+data/*.db
+data/*.sqlite
+
+# Sensitive Configuration
+config/local.js
+config/secrets.js
+
+# Cache
+.cache/
+.eslintcache
+.stylelintcache
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+
+# Dependencies lock files (optional, for strict versioning)
+# Uncomment if you prefer to share lock files
+# package-lock.json
+# yarn.lock
+
+# Database
+mongodb/
+*.mongodb
+
+# API Keys and Secrets (CRITICAL)
+.env
+.env.local
+secrets.json
+keys.json
+credentials.json
+tokens.json
+
+# Bot Token History (CRITICAL)
+token.txt
+tokens/
+auth/
+
+# Spotify API Secrets (CRITICAL)
+spotify_config.json
+
+# MongoDB Connection Strings (CRITICAL)
+mongo_connections.txt
+
+# User Data & Conversations
+conversations/
+history/
+userData/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Build artifacts
+*.tsbuildinfo
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Private/Local testing files
+test-*.js
+local-*.js
+*-local.*
