@@ -79,7 +79,7 @@ roxy/
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/roxy.git
+   git clone https://github.com/STWJXSX/Roxy-music.git
    cd roxy
    ```
 
