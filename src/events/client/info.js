@@ -9,7 +9,7 @@ const config = require('../../config');
 // Configuration - Replace with your IDs
 const CONFIG = {
   GUILD_ID: '810129117260283915', // Replace with your server ID
-  CHANNEL_ID: '1462557185094451210', // Replace with your channel ID
+  CHANNEL_ID: '1462556531630276679', // Replace with your channel ID
   UPDATE_INTERVAL: 10 * 60 * 1000, // 10 minutes
   INITIAL_DELAY: 60 * 1000 // 1 minute initial delay
 };
@@ -416,7 +416,7 @@ async function initializeSystemMonitoring(client) {
 }
 
 module.exports = {
-  name: 'ready',
+  name: 'clientReady',
   once: true,
   
   /**

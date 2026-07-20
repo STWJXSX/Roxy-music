@@ -3,7 +3,7 @@ const { Logger, StatsManager } = require('../../utils');
 const config = require('../../config');
 
 module.exports = {
-    name: 'ready',
+    name: 'clientReady',
     once: true,
     
     /**

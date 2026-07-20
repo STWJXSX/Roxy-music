@@ -10,6 +10,7 @@ const RoxyConversationHistory = require('../../modelosdb/RoxyConversationHistory
 const SESSION_TIMEOUT_MINUTES = 5;
 const SESSION_TIMEOUT_MS = SESSION_TIMEOUT_MINUTES * 60 * 1000;
 
+// Configuración de tu API
 const API_BASE_URL = "https://nephra.space/api/v1";
 const API_KEY = process.env.NEPHRA_API_KEY;
 

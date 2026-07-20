@@ -1,0 +1,26 @@
+{
+  "name": "roxy-music-bot",
+  "version": "1.0.0",
+  "description": "Roxy Music Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.0",
+    "chalk": "^4.1.2",
+    "discord.js": "^14.22.1",
+    "dotenv": "^16.5.0",
+    "ffmpeg-static": "^5.3.0",
+    "mediaplex": "^1.0.0",
+    "mongoose": "^8.14.3",
+    "node-fetch": "^2.7.0",
+    "play-dl": "^1.9.7",
+    "prism-media": "^1.3.5",
+    "sodium-native": "^5.0.10"
+  },
+  "author": "STW_JXSX",
+  "license": "ISC"
+}

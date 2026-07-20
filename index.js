@@ -5,9 +5,16 @@ const mongoose = require('mongoose');
 const { MusicPlayer, registerPlayerEvents } = require('./src/music');
 const config = require('./src/config');
 
-// Production mode check
-const isProduction = process.env.PRODUCTION === 'true' || process.env.NODE_ENV === 'production';
-const log = (...args) => { if (!isProduction) console.log(...args); };
+// Mode detection — same pattern as all other bots
+const IS_PROD = process.argv.includes('--prod') || process.env.NODE_ENV === 'production';
+console.log(`[ROXY] Mode: ${IS_PROD ? chalk.red('PRODUCTION') : chalk.green('DEV')} (${IS_PROD ? 'TOKEN_PROD' : 'TOKEN_TEST'})`);
+if (!config.token) {
+    console.error(chalk.red(`[ROXY] Missing token: ${IS_PROD ? 'TOKEN_PROD' : 'TOKEN_TEST'} not set in .env`));
+    process.exit(1);
+}
+
+// Suppress verbose logs in production
+const log = (...args) => { if (!IS_PROD) console.log(...args); };
 
 /**
  * Roxy Music Bot
@@ -58,13 +65,9 @@ class RoxyBot {
     async start() {
         try {
             log(chalk.cyan(`[ROXY] :: Starting ${config.bot.name} v${config.bot.version}...`));
-            if (isProduction) console.log(chalk.green('[ROXY] :: Starting in PRODUCTION mode (logging disabled)'));
+            if (IS_PROD) console.log(chalk.green('[ROXY] :: Starting in PRODUCTION mode (logging disabled)'));
 
             // Validate configuration
-            if (!config.token) {
-                throw new Error('Missing DISCORD_TOKEN in environment variables');
-            }
-
             if (!config.clientId) {
                 throw new Error('Missing CLIENT_ID in environment variables');
             }
@@ -96,7 +99,7 @@ class RoxyBot {
             await cargarComandos(this.client);
 
             log(chalk.green(`[ROXY] :: ${config.bot.name} is now online!`));
-            if (isProduction) console.log(chalk.green('[ROXY] :: Bot is now online and ready!'));
+            if (IS_PROD) console.log(chalk.green('[ROXY] :: Bot is now online and ready!'));
 
         } catch (error) {
             console.error(chalk.red('[ROXY] :: Failed to start bot:'), error);

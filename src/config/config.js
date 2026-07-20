@@ -1,8 +1,18 @@
 require('dotenv').config();
 
+const path = require('path');
+const { existsSync } = require('fs');
+
+const IS_PROD = process.argv.includes('--prod') || process.env.NODE_ENV === 'production';
+const TOKEN = IS_PROD ? process.env.TOKEN_PROD : process.env.TOKEN_TEST;
+const isWindows = process.platform === 'win32';
+const roxyRoot = path.join(__dirname, '..', '..');
+const localYtDlp = path.join(roxyRoot, 'yt-dlp.exe');
+
 module.exports = {
     // Discord Configuration
-    token: process.env.DISCORD_TOKEN,
+    token: TOKEN,
+    isProd: IS_PROD,
     clientId: process.env.CLIENT_ID,
     prefix: ["!", "r", "roxy", "R", "ROXY"],
 
@@ -41,8 +51,8 @@ module.exports = {
         emoji: '🎵',
     },
 
-    // System Configuration
-    // Set IS_WINDOWS=true in .env for Windows (uses yt-dlp.exe)
-    // Set IS_WINDOWS=false for Linux/Debian/Ubuntu (uses system yt-dlp from apt)
-    isWindows: process.env.IS_WINDOWS !== 'false', // Default to Windows if not specified
+    // Platform tools (auto-detected via process.platform)
+    isWindows,
+    ytDlpPath: isWindows ? (existsSync(localYtDlp) ? localYtDlp : 'yt-dlp') : 'yt-dlp',
+    ffmpegBin: 'ffmpeg',
 };

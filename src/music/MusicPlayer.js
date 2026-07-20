@@ -15,12 +15,31 @@ const path = require('path');
 const { Logger, StatsManager } = require('../utils');
 const config = require('../config');
 
-// Path to yt-dlp executable
-// Windows: uses local yt-dlp.exe in music folder
-// Linux/Debian/Ubuntu: uses system yt-dlp (install with: apt update && apt install yt-dlp -y)
-const YTDLP_PATH = config.isWindows 
-    ? path.join(__dirname, '..', '..', 'yt-dlp.exe')
-    : 'yt-dlp';
+// yt-dlp / ffmpeg — resolved by OS in config (Windows: local .exe, Linux: PATH)
+const YTDLP_PATH = config.ytDlpPath;
+const FFMPEG_BIN = config.ffmpegBin;
+
+// Proxy URL from env
+const PROXY_URL = process.env.PROXY_URL || '';
+
+// Player client strategies to rotate on 403 errors
+const PLAYER_CLIENTS = [
+    'android_vr',
+    'web_embedded',
+    'tv',
+    'android_music',
+    'web_creator',
+    'mediaconnect',
+    'ios',
+];
+
+// Realistic user agents to rotate
+const USER_AGENTS = [
+    'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)',
+    'com.google.android.youtube/19.29.37 (Linux; U; Android 14; en_US) gzip',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+];
 
 /**
  * Queue item structure
@@ -164,80 +183,145 @@ class MusicPlayer {
     }
     
     /**
+     * Get tracks from Spotify URL using the public embed page (no auth required).
+     * Works for all playlist types including algorithmic/editorial playlists.
+     */
+    async getSpotifyTracksFromEmbed(url) {
+        try {
+            const match = url.match(/spotify\.com\/(?:intl-[a-z]{2}\/)?(track|album|playlist)\/([a-zA-Z0-9]+)/);
+            if (!match) return null;
+            const [, type, id] = match;
+
+            // Get thumbnail + name from oEmbed (no auth)
+            const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/${type}/${id}`, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            });
+            const oembed = oembedRes.ok ? await oembedRes.json() : {};
+
+            // Get trackList from embed HTML
+            const embedRes = await fetch(`https://open.spotify.com/embed/${type}/${id}?utm_source=oembed`, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            });
+            if (!embedRes.ok) return null;
+            const html = await embedRes.text();
+
+            // Extract the trackList JSON array using bracket counting
+            const listIdx = html.indexOf('"trackList":[');
+            if (listIdx < 0) {
+                Logger.warn('[SPOTIFY_EMBED] No trackList found in embed HTML');
+                return null;
+            }
+            const arrayStart = html.indexOf('[', listIdx);
+            let depth = 0, endIdx = arrayStart;
+            for (; endIdx < html.length; endIdx++) {
+                if (html[endIdx] === '[') depth++;
+                else if (html[endIdx] === ']') { depth--; if (depth === 0) break; }
+            }
+            const trackListJson = html.slice(arrayStart, endIdx + 1);
+            const trackList = JSON.parse(trackListJson);
+
+            const tracks = trackList
+                .filter(t => t.entityType === 'track' && t.isPlayable)
+                .map(t => ({
+                    name: t.title,
+                    // subtitle can be "Artist1, Artist2" — use first artist for cleaner YT search
+                    artist: (t.subtitle || '').split(',')[0].trim() || 'Unknown',
+                    duration_ms: t.duration || 0
+                }));
+
+            // Extract name/author from the JSON surrounding the trackList
+            const metaChunk = html.slice(Math.max(0, listIdx - 1000), listIdx);
+            const nameMatch = metaChunk.match(/"name"\s*:\s*"([^"]+)"/g);
+            const playlistName = oembed.title || (nameMatch ? JSON.parse(`{${nameMatch[nameMatch.length-1]}}`).name : null);
+            const authorMatch = metaChunk.match(/"(?:ownerDisplayName|display_name|subtitle)"\s*:\s*"([^"]+)"/);
+            const playlistAuthor = authorMatch ? authorMatch[1] : 'Spotify';
+            const playlistThumbnail = oembed.thumbnail_url || null;
+
+            Logger.info(`[SPOTIFY_EMBED] Got ${tracks.length} tracks for ${type}: "${playlistName}"`);
+            return { tracks, playlistName, playlistAuthor, playlistThumbnail, type };
+        } catch (e) {
+            Logger.error(`[SPOTIFY_EMBED] Failed: ${e.message}`);
+            return null;
+        }
+    }
+
+    /**
      * Get tracks from Spotify URL using direct API
      */
     async getSpotifyTracks(url, requestedBy) {
+        // Try official API first (fast, paginated), fall back to embed scraping
         const token = await this.refreshSpotifyToken();
-        if (!token) {
-            Logger.warn('No Spotify token available');
-            return null;
-        }
-        
-        try {
-            // Extract Spotify ID and type from URL - handles intl-XX/ prefix
-            const match = url.match(/spotify\.com\/(?:intl-[a-z]{2}\/)?(track|album|playlist)\/([a-zA-Z0-9]+)/);
-            if (!match) {
-                Logger.warn(`[SPOTIFY] Could not parse URL: ${url}`);
-                return null;
-            }
-            
-            const [, type, id] = match;
-            Logger.info(`[SPOTIFY] Fetching ${type}: ${id}`);
-            
-            let tracks = [];
-            let playlistName = null;
-            let playlistAuthor = null;
-            let playlistThumbnail = null;
-            
-            if (type === 'track') {
-                const response = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
-                const track = await response.json();
-                tracks = [{
-                    name: track.name,
-                    artist: track.artists[0]?.name || 'Unknown',
-                    duration_ms: track.duration_ms
-                }];
-            } else if (type === 'album') {
-                const response = await fetch(`https://api.spotify.com/v1/albums/${id}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
-                const album = await response.json();
-                playlistName = album.name;
-                playlistAuthor = album.artists?.[0]?.name || 'Unknown Artist';
-                playlistThumbnail = album.images?.[0]?.url || null;
-                tracks = album.tracks.items.map(t => ({
-                    name: t.name,
-                    artist: t.artists[0]?.name || 'Unknown',
-                    duration_ms: t.duration_ms
-                }));
-            } else if (type === 'playlist') {
-                const response = await fetch(`https://api.spotify.com/v1/playlists/${id}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
-                const playlist = await response.json();
-                playlistName = playlist.name;
-                playlistAuthor = playlist.owner?.display_name || 'Unknown';
-                playlistThumbnail = playlist.images?.[0]?.url || null;
-                tracks = playlist.tracks.items
-                    .filter(item => item.track)
-                    .map(item => ({
-                        name: item.track.name,
-                        artist: item.track.artists[0]?.name || 'Unknown',
-                        duration_ms: item.track.duration_ms
+
+        if (token) {
+            try {
+                const match = url.match(/spotify\.com\/(?:intl-[a-z]{2}\/)?(track|album|playlist)\/([a-zA-Z0-9]+)/);
+                if (!match) {
+                    Logger.warn(`[SPOTIFY] Could not parse URL: ${url}`);
+                    return null;
+                }
+
+                const [, type, id] = match;
+                Logger.info(`[SPOTIFY] Fetching ${type}: ${id}`);
+
+                let tracks = [];
+                let playlistName = null;
+                let playlistAuthor = null;
+                let playlistThumbnail = null;
+
+                if (type === 'track') {
+                    const response = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
+                    const track = await response.json();
+                    tracks = [{
+                        name: track.name,
+                        artist: track.artists[0]?.name || 'Unknown',
+                        duration_ms: track.duration_ms
+                    }];
+                } else if (type === 'album') {
+                    const response = await fetch(`https://api.spotify.com/v1/albums/${id}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
+                    const album = await response.json();
+                    playlistName = album.name;
+                    playlistAuthor = album.artists?.[0]?.name || 'Unknown Artist';
+                    playlistThumbnail = album.images?.[0]?.url || null;
+                    tracks = album.tracks.items.map(t => ({
+                        name: t.name,
+                        artist: t.artists[0]?.name || 'Unknown',
+                        duration_ms: t.duration_ms
                     }));
+                } else if (type === 'playlist') {
+                    const response = await fetch(`https://api.spotify.com/v1/playlists/${id}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (!response.ok) throw new Error(`Spotify API error: ${response.status}`);
+                    const playlist = await response.json();
+                    playlistName = playlist.name;
+                    playlistAuthor = playlist.owner?.display_name || 'Unknown';
+                    playlistThumbnail = playlist.images?.[0]?.url || null;
+                    tracks = playlist.tracks.items
+                        .filter(item => item.track)
+                        .map(item => ({
+                            name: item.track.name,
+                            artist: item.track.artists[0]?.name || 'Unknown',
+                            duration_ms: item.track.duration_ms
+                        }));
+                }
+
+                Logger.info(`[SPOTIFY] Got ${tracks.length} tracks from ${type}`);
+                return { tracks, playlistName, playlistAuthor, playlistThumbnail, type };
+            } catch (e) {
+                Logger.warn(`[SPOTIFY] API failed (${e.message}), falling back to embed parsing`);
             }
-            
-            Logger.info(`[SPOTIFY] Got ${tracks.length} tracks from ${type}`);
-            return { tracks, playlistName, playlistAuthor, playlistThumbnail, type };
-        } catch (e) {
-            Logger.error(`[SPOTIFY] API error: ${e.message}`);
-            return null;
+        } else {
+            Logger.warn('[SPOTIFY] No token, trying embed parsing');
         }
+
+        // Fallback: embed HTML parsing (works for editorial playlists that block the API)
+        return this.getSpotifyTracksFromEmbed(url);
     }
     
     /**
@@ -448,12 +532,27 @@ class MusicPlayer {
                             };
                         }
                     } else {
-                        // For playlists/albums, only search the first track now
+                        // For playlists/albums, search the first few tracks until one is found
                         // The rest will be loaded in background
-                        const firstTrack = spotifyData.tracks[0];
-                        const firstResult = await this.searchYouTubeForSpotifyTrack(firstTrack, requestedBy);
-                        
+                        const MAX_FIRST_TRACK_ATTEMPTS = 5;
+                        let firstResult = null;
+                        let firstFoundIndex = 0;
+
+                        for (let i = 0; i < Math.min(MAX_FIRST_TRACK_ATTEMPTS, spotifyData.tracks.length); i++) {
+                            firstResult = await this.searchYouTubeForSpotifyTrack(spotifyData.tracks[i], requestedBy);
+                            if (firstResult) {
+                                firstFoundIndex = i;
+                                break;
+                            }
+                            Logger.warn(`[SPOTIFY] Could not find track ${i + 1} on YouTube, trying next...`);
+                        }
+
                         if (firstResult) {
+                            // Remaining = everything after the found track
+                            const remainingTracks = [
+                                ...spotifyData.tracks.slice(0, firstFoundIndex),
+                                ...spotifyData.tracks.slice(firstFoundIndex + 1)
+                            ];
                             return {
                                 hasTracks: () => true,
                                 tracks: [firstResult],
@@ -465,7 +564,7 @@ class MusicPlayer {
                                 },
                                 // Pass remaining tracks to load in background
                                 spotifyData: {
-                                    remainingTracks: spotifyData.tracks.slice(1),
+                                    remainingTracks,
                                     playlistName: spotifyData.playlistName,
                                     playlistAuthor: spotifyData.playlistAuthor,
                                     playlistThumbnail: spotifyData.playlistThumbnail,
@@ -948,45 +1047,52 @@ class MusicPlayer {
         try {
             Logger.info(`Getting stream for: ${queue.currentTrack.url}`);
             
-            // Use yt-dlp to get audio URL, then stream via FFmpeg
-            const ytdlp = spawn(YTDLP_PATH, [
-                '-f', 'bestaudio/best',
-                '-g',  // Get URL only, don't download
-                '--no-warnings',
-                '--no-playlist',
-                '--no-check-certificates',
-                queue.currentTrack.url
-            ], {
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+            // Try multiple strategies to get audio URL (bypass 403)
+            let audioUrl = null;
+            let lastError = null;
             
-            let audioUrl = '';
-            
-            ytdlp.stdout.on('data', (data) => {
-                audioUrl += data.toString().trim();
-            });
-            
-            // Wait for yt-dlp to get the URL
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('yt-dlp timeout')), 15000);
-                ytdlp.on('close', (code) => {
-                    clearTimeout(timeout);
-                    if (code === 0 && audioUrl) {
-                        resolve();
-                    } else {
-                        reject(new Error('Failed to get audio URL'));
+            for (let attempt = 0; attempt < PLAYER_CLIENTS.length; attempt++) {
+                const playerClient = PLAYER_CLIENTS[attempt];
+                const userAgent = USER_AGENTS[attempt % USER_AGENTS.length];
+                
+                try {
+                    audioUrl = await this._getAudioUrl(queue.currentTrack.url, playerClient, userAgent);
+                    if (audioUrl) {
+                        Logger.info(`[STREAM] Got audio URL with client: ${playerClient} (attempt ${attempt + 1})`);
+                        break;
                     }
-                });
-                ytdlp.on('error', reject);
-            });
+                } catch (err) {
+                    lastError = err;
+                    Logger.warn(`[STREAM] Attempt ${attempt + 1} failed (client: ${playerClient}): ${err.message}`);
+                    // Fatal error — no point trying other clients
+                    if (err.fatal) break;
+                }
+            }
+            
+            if (!audioUrl) {
+                throw lastError || new Error('All stream strategies failed - YouTube 403');
+            }
             
             Logger.info(`Got audio URL, streaming via FFmpeg...`);
             
-            // Now stream the URL through FFmpeg to get PCM audio
-            const ffmpeg = spawn('ffmpeg', [
+            // Build FFmpeg args with proxy-friendly reconnect settings
+            const ffmpegArgs = [
                 '-reconnect', '1',
                 '-reconnect_streamed', '1', 
-                '-reconnect_delay_max', '3',
+                '-reconnect_delay_max', '5',
+                '-reconnect_on_network_error', '1',
+                '-reconnect_on_http_error', '403,429,5xx',
+                '-multiple_requests', '1',
+                '-user_agent', USER_AGENTS[0],
+                '-headers', 'Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com\r\n',
+            ];
+            
+            // Add proxy to FFmpeg if configured
+            if (PROXY_URL) {
+                ffmpegArgs.push('-http_proxy', PROXY_URL);
+            }
+            
+            ffmpegArgs.push(
                 '-i', audioUrl,
                 '-analyzeduration', '0',
                 '-loglevel', '0',
@@ -994,7 +1100,10 @@ class MusicPlayer {
                 '-ar', '48000',
                 '-ac', '2',
                 'pipe:1'
-            ], {
+            );
+            
+            // Now stream the URL through FFmpeg to get PCM audio
+            const ffmpeg = spawn(FFMPEG_BIN, ffmpegArgs, {
                 stdio: ['pipe', 'pipe', 'pipe']
             });
             
@@ -1056,11 +1165,100 @@ class MusicPlayer {
             this.client.emit('trackStart', queue, queue.currentTrack);
         } catch (error) {
             Logger.error(`[PLAY] Failed to play track: ${error.message}`);
-            // Only call handleTrackEnd if we actually have a currentTrack
+            // Notify the text channel about the failed track
             if (queue.currentTrack) {
+                this.client.emit('trackError', queue, queue.currentTrack, error);
                 this.handleTrackEnd(queue);
             }
         }
+    }
+
+    /**
+     * Get audio URL using yt-dlp with anti-403 measures
+     */
+    async _getAudioUrl(videoUrl, playerClient, userAgent) {
+        const args = [
+            '-f', 'bestaudio[acodec=opus]/bestaudio/bestaudio*/best*',
+            '-g',
+            '--no-warnings',
+            '--no-playlist',
+            '--no-check-certificates',
+            '--extractor-args', `youtube:player_client=${playerClient}`,
+            '--user-agent', userAgent,
+            '--referer', 'https://www.youtube.com/',
+            '--add-header', 'Accept-Language:en-US,en;q=0.9',
+            '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ];
+
+        // Add proxy if configured
+        if (PROXY_URL) {
+            args.push('--proxy', PROXY_URL);
+            Logger.info(`[STREAM] Using proxy: ${PROXY_URL.replace(/\/\/.*@/, '//***@')}`);
+        }
+
+        // Add cookies file if it exists
+        const cookiesPath = path.join(__dirname, '..', '..', 'cookies.txt');
+        try {
+            const fs = require('fs');
+            if (fs.existsSync(cookiesPath)) {
+                args.push('--cookies', cookiesPath);
+                Logger.info('[STREAM] Using cookies.txt');
+            }
+        } catch (e) {}
+
+        args.push(videoUrl);
+
+        return new Promise((resolve, reject) => {
+            // Remove SSLKEYLOGFILE to avoid PermissionError on C:\ssl_keys.log
+            const env = { ...process.env };
+            delete env.SSLKEYLOGFILE;
+
+            const ytdlp = spawn(YTDLP_PATH, args, {
+                stdio: ['pipe', 'pipe', 'pipe'],
+                env
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            ytdlp.stdout.on('data', (data) => {
+                stdout += data.toString();
+            });
+
+            ytdlp.stderr.on('data', (data) => {
+                stderr += data.toString();
+            });
+
+            const timeout = setTimeout(() => {
+                ytdlp.kill('SIGKILL');
+                reject(new Error('yt-dlp timeout (20s)'));
+            }, 20000);
+
+            ytdlp.on('close', (code) => {
+                clearTimeout(timeout);
+                const audioUrl = stdout.trim().split('\n')[0];
+                if (code === 0 && audioUrl) {
+                    resolve(audioUrl);
+                } else {
+                    const is403 = stderr.includes('403') || stderr.includes('HTTP Error');
+                    // Detect fatal/unrecoverable errors — no point retrying other clients
+                    const isUnavailable =
+                        stderr.includes('This video is not available') ||
+                        stderr.includes('Video unavailable') ||
+                        stderr.includes('Private video') ||
+                        stderr.includes('This video has been removed') ||
+                        stderr.includes('Requested format is not available');
+                    const err = new Error(is403 ? `403 Forbidden (client: ${playerClient})` : `yt-dlp exit ${code}: ${stderr.slice(0, 200)}`);
+                    if (isUnavailable) err.fatal = true;
+                    reject(err);
+                }
+            });
+
+            ytdlp.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
     }
 
     /**
