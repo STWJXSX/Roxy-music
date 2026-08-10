@@ -1,7 +1,7 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env'), override: true });
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const chalk = require('chalk');
-const mongoose = require('mongoose');
 const { MusicPlayer, registerPlayerEvents } = require('./src/music');
 const config = require('./src/config');
 
@@ -39,27 +39,6 @@ class RoxyBot {
     }
 
     /**
-     * Connect to MongoDB
-     */
-    async connectMongoDB() {
-        const mongoURI = process.env.MONGO_URI;
-        
-        if (!mongoURI) {
-            console.log(chalk.yellow('[ROXY] :: No MONGO_URI found - Premium features disabled'));
-            return false;
-        }
-
-        try {
-            await mongoose.connect(mongoURI);
-            log(chalk.magenta('[MONGODB] :: Connected to MongoDB'));
-            return true;
-        } catch (error) {
-            console.error(chalk.red('[MONGODB ERROR] :: Failed to connect:'), error.message);
-            return false;
-        }
-    }
-
-    /**
      * Initialize and start the bot
      */
     async start() {
@@ -71,9 +50,6 @@ class RoxyBot {
             if (!config.clientId) {
                 throw new Error('Missing CLIENT_ID in environment variables');
             }
-
-            // Connect to MongoDB for premium features
-            await this.connectMongoDB();
 
             // Initialize music player
             await this.musicPlayer.initialize();

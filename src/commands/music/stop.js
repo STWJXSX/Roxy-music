@@ -44,12 +44,7 @@ module.exports = {
                         .setLabel('Official Server')
                         .setStyle(ButtonStyle.Link)
                         .setURL('https://discord.gg/u4yDzZ7GZF')
-                        .setEmoji('🏠'),
-                    new ButtonBuilder()
-                        .setLabel('Premium Info')
-                        .setStyle(ButtonStyle.Link)
-                        .setURL('https://discord.com/channels/810129117260283915/1451337495680782367')
-                        .setEmoji('👑')
+                        .setEmoji('🏠')
                 );
             
             return interaction.reply({ embeds: [embed], components: [row] });

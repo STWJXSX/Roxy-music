@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '..', '.env'), override: true });
 require('dotenv').config();
 
 const path = require('path');
@@ -8,6 +9,21 @@ const TOKEN = IS_PROD ? process.env.TOKEN_PROD : process.env.TOKEN_TEST;
 const isWindows = process.platform === 'win32';
 const roxyRoot = path.join(__dirname, '..', '..');
 const localYtDlp = path.join(roxyRoot, 'yt-dlp.exe');
+
+function resolveFfmpegBin() {
+    if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) {
+        return process.env.FFMPEG_PATH;
+    }
+    try {
+        const ffmpegStatic = require('ffmpeg-static');
+        if (ffmpegStatic && existsSync(ffmpegStatic)) {
+            return ffmpegStatic;
+        }
+    } catch {
+        // ffmpeg-static optional at install time
+    }
+    return 'ffmpeg';
+}
 
 module.exports = {
     // Discord Configuration
@@ -54,5 +70,6 @@ module.exports = {
     // Platform tools (auto-detected via process.platform)
     isWindows,
     ytDlpPath: isWindows ? (existsSync(localYtDlp) ? localYtDlp : 'yt-dlp') : 'yt-dlp',
-    ffmpegBin: 'ffmpeg',
+    ffmpegBin: resolveFfmpegBin(),
+    ffmpegStartupTimeoutMs: isWindows ? 15000 : 8000,
 };

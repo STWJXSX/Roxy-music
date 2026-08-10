@@ -3,12 +3,19 @@ const { EmbedBuilder } = require("discord.js");
 // Usar node-fetch igual que AI.js (funciona)
 const fetch = require('node-fetch');
 
-// Modelo de historial de conversación para Roxy
-const RoxyConversationHistory = require('../../modelosdb/RoxyConversationHistory');
+// Historial de conversación en memoria (sin MongoDB)
+const conversationStore = new Map();
 
 // Configuración de sesiones (igual que AI.js)
 const SESSION_TIMEOUT_MINUTES = 5;
 const SESSION_TIMEOUT_MS = SESSION_TIMEOUT_MINUTES * 60 * 1000;
+
+function getUserSessions(userId) {
+  if (!conversationStore.has(userId)) {
+    conversationStore.set(userId, []);
+  }
+  return conversationStore.get(userId);
+}
 
 // Configuración de tu API
 const API_BASE_URL = "https://nephra.space/api/v1";
@@ -157,9 +164,8 @@ async function callRoxyAI(userMessage, context) {
   const { userId, username } = context;
   const currentTime = Date.now();
   
-  // ========== SISTEMA DE HISTORIAL DE CONVERSACIÓN ==========
-  let userHistory = await RoxyConversationHistory.findOne({ userId });
-  let sessions = userHistory?.sessions || [];
+  // ========== SISTEMA DE HISTORIAL DE CONVERSACIÓN (memoria) ==========
+  const sessions = getUserSessions(userId);
   let currentSession = null;
   
   // Buscar sesión activa
@@ -193,26 +199,6 @@ async function callRoxyAI(userMessage, context) {
     timestamp: currentTime,
   });
   currentSession.lastMessageTime = currentTime;
-  
-  // Crear o actualizar historial en DB
-  if (!userHistory) {
-    userHistory = await RoxyConversationHistory.findOneAndUpdate(
-      { userId },
-      {
-        $setOnInsert: {
-          userId,
-          username,
-          sessions: sessions,
-          userData: {}
-        }
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-  } else {
-    userHistory.sessions = sessions;
-    userHistory.username = username;
-    await userHistory.save();
-  }
   
   // Obtener historial de la sesión para contexto
   const sessionHistory = currentSession.messages.filter(m => m.role === "user" || m.role === "assistant");
@@ -286,8 +272,6 @@ async function callRoxyAI(userMessage, context) {
       timestamp: Date.now(),
     });
     currentSession.lastMessageTime = Date.now();
-    userHistory.sessions = sessions;
-    await userHistory.save();
     console.log(`[Roxy AI] ✅ OK - Respuesta guardada (${currentSession.messages.length} msgs en sesión)`);
     
     return { ok: true, content };
@@ -298,38 +282,30 @@ async function callRoxyAI(userMessage, context) {
   }
 }
 
-// Función para limpiar sesiones expiradas (se puede llamar periódicamente)
-async function cleanOldSessions() {
-  try {
-    const now = Date.now();
-    const histories = await RoxyConversationHistory.find({});
-    let cleanedUsers = 0;
-    let deletedSessions = 0;
-    
-    for (const history of histories) {
-      const originalCount = history.sessions.length;
-      
-      history.sessions = history.sessions.filter(session => {
-        const timeSince = now - new Date(session.lastMessageTime).getTime();
-        return timeSince < SESSION_TIMEOUT_MS;
-      });
-      
-      if (history.sessions.length !== originalCount) {
-        deletedSessions += (originalCount - history.sessions.length);
-        if (history.sessions.length === 0) {
-          await RoxyConversationHistory.deleteOne({ userId: history.userId });
-          cleanedUsers++;
-        } else {
-          await history.save();
-        }
+// Función para limpiar sesiones expiradas (memoria)
+function cleanOldSessions() {
+  const now = Date.now();
+  let deletedSessions = 0;
+
+  for (const [userId, sessions] of conversationStore.entries()) {
+    const before = sessions.length;
+    const active = sessions.filter(session => {
+      const timeSince = now - new Date(session.lastMessageTime).getTime();
+      return timeSince < SESSION_TIMEOUT_MS;
+    });
+
+    if (active.length !== before) {
+      deletedSessions += before - active.length;
+      if (active.length === 0) {
+        conversationStore.delete(userId);
+      } else {
+        conversationStore.set(userId, active);
       }
     }
-    
-    if (deletedSessions > 0) {
-      console.log(`[Roxy AI] Limpieza: ${deletedSessions} sesiones eliminadas, ${cleanedUsers} usuarios limpiados`);
-    }
-  } catch (error) {
-    console.error("[Roxy AI] Error en limpieza:", error);
+  }
+
+  if (deletedSessions > 0) {
+    console.log(`[Roxy AI] Limpieza: ${deletedSessions} sesiones eliminadas`);
   }
 }
 

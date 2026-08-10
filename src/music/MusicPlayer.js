@@ -19,6 +19,45 @@ const config = require('../config');
 const YTDLP_PATH = config.ytDlpPath;
 const FFMPEG_BIN = config.ffmpegBin;
 
+function truncateUrl(url, max = 120) {
+    if (!url || url.length <= max) return url || '';
+    return `${url.slice(0, max)}…`;
+}
+
+/** Attach stderr logging to an ffmpeg child process (debug level). */
+function attachFfmpegLogging(ffmpeg) {
+    ffmpeg.stderr.on('data', (chunk) => {
+        for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
+            Logger.debug(`[FFMPEG] ${line.slice(0, 400)}`);
+        }
+    });
+}
+
+async function verifyBinary(label, binPath, versionArgs = ['-version']) {
+    const fs = require('fs');
+    const exists = binPath.includes(path.sep) ? fs.existsSync(binPath) : true;
+    Logger.info(`[TOOLS] ${label}: ${binPath} (exists=${exists})`);
+    if (!exists) {
+        Logger.warn(`[TOOLS] ${label} path not found on disk`);
+        return;
+    }
+    return new Promise((resolve) => {
+        const proc = spawn(binPath, versionArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.stderr.on('data', (d) => { out += d.toString(); });
+        proc.on('error', (err) => {
+            Logger.warn(`[TOOLS] ${label} failed to run: ${err.message}`);
+            resolve();
+        });
+        proc.on('close', () => {
+            const firstLine = out.split(/\r?\n/).find(Boolean) || '(no version output)';
+            Logger.info(`[TOOLS] ${label}: ${firstLine.slice(0, 160)}`);
+            resolve();
+        });
+    });
+}
+
 // Proxy URL from env
 const PROXY_URL = process.env.PROXY_URL || '';
 
@@ -143,6 +182,10 @@ class MusicPlayer {
         }
 
         this.client.player = this;
+        Logger.info(`[TOOLS] platform=${process.platform} arch=${process.arch}`);
+        Logger.info(`[TOOLS] proxy=${PROXY_URL ? 'enabled' : 'disabled'}`);
+        await verifyBinary('yt-dlp', YTDLP_PATH);
+        await verifyBinary('ffmpeg', FFMPEG_BIN);
         Logger.success('Music player initialized with play-dl + @discordjs/voice');
         return this;
     }
@@ -446,12 +489,7 @@ class MusicPlayer {
                     .setLabel('Official Server')
                     .setStyle(ButtonStyle.Link)
                     .setURL('https://discord.gg/u4yDzZ7GZF')
-                    .setEmoji('🏠'),
-                new ButtonBuilder()
-                    .setLabel('Premium Info')
-                    .setStyle(ButtonStyle.Link)
-                    .setURL('https://discord.com/channels/810129117260283915/1451337495680782367')
-                    .setEmoji('👑')
+                    .setEmoji('🏠')
             );
         
         queue.textChannel.send({ embeds: [embed], components: [row] }).catch(() => {});
@@ -488,12 +526,7 @@ class MusicPlayer {
                     .setLabel('Official Server')
                     .setStyle(ButtonStyle.Link)
                     .setURL('https://discord.gg/u4yDzZ7GZF')
-                    .setEmoji('🏠'),
-                new ButtonBuilder()
-                    .setLabel('Premium Info')
-                    .setStyle(ButtonStyle.Link)
-                    .setURL('https://discord.com/channels/810129117260283915/1451337495680782367')
-                    .setEmoji('👑')
+                    .setEmoji('🏠')
             );
         
         queue.textChannel.send({ embeds: [embed], components: [row] }).catch(() => {});
@@ -939,23 +972,34 @@ class MusicPlayer {
             this.queues.delete(queue.guildId);
         });
 
-        // Handle player state changes
-        queue.player.on(AudioPlayerStatus.Idle, () => {
-            this.handleTrackEnd(queue);
+        // Handle player state changes (track end, errors)
+        queue.player.on('stateChange', (oldState, newState) => {
+            Logger.debug(`[PLAYER] ${oldState.status} -> ${newState.status}`);
+
+            if (newState.status !== AudioPlayerStatus.Idle) return;
+            if (oldState.status === AudioPlayerStatus.Idle) return;
+
+            const durationMs = Math.round(oldState.resource?.playbackDuration ?? 0);
+            Logger.info(`[PLAYER] Track idle (${durationMs}ms played)`);
+
+            if (queue._isPlaying) {
+                queue._pendingTrackEnd = true;
+                return;
+            }
+
+            this.handleTrackEnd(queue, { durationMs });
         });
 
         queue.player.on('error', error => {
-            Logger.error(`Player error: ${error.message}`);
-            Logger.error(`Error stack: ${error.stack}`);
+            Logger.error(`[PLAYER] Error: ${error.message}`);
             if (error.resource) {
-                Logger.error(`Resource playback duration: ${error.resource.playbackDuration}ms`);
+                Logger.error(`[PLAYER] Playback duration: ${error.resource.playbackDuration}ms`);
             }
-            this.handleTrackEnd(queue);
-        });
-
-        // Debug state changes
-        queue.player.on('stateChange', (oldState, newState) => {
-            Logger.info(`Player state changed: ${oldState.status} -> ${newState.status}`);
+            if (queue._isPlaying) {
+                queue._pendingTrackEnd = true;
+                return;
+            }
+            this.handleTrackEnd(queue, { error });
         });
 
         // Wait for connection to be ready
@@ -986,6 +1030,10 @@ class MusicPlayer {
             await this._doPlayNext(queue);
         } finally {
             queue._isPlaying = false;
+            if (queue._pendingTrackEnd) {
+                queue._pendingTrackEnd = false;
+                this.handleTrackEnd(queue);
+            }
         }
     }
     
@@ -1074,6 +1122,7 @@ class MusicPlayer {
             }
             
             Logger.info(`Got audio URL, streaming via FFmpeg...`);
+            Logger.debug(`[FFMPEG] bin=${FFMPEG_BIN} url=${truncateUrl(audioUrl)}`);
             
             // Build FFmpeg args with proxy-friendly reconnect settings
             const ffmpegArgs = [
@@ -1090,72 +1139,47 @@ class MusicPlayer {
             // Add proxy to FFmpeg if configured
             if (PROXY_URL) {
                 ffmpegArgs.push('-http_proxy', PROXY_URL);
+                Logger.info(`[FFMPEG] Using proxy for stream`);
             }
             
             ffmpegArgs.push(
                 '-i', audioUrl,
                 '-analyzeduration', '0',
-                '-loglevel', '0',
+                '-loglevel', 'warning',
                 '-f', 's16le',
                 '-ar', '48000',
                 '-ac', '2',
                 'pipe:1'
             );
             
+            Logger.debug(`[FFMPEG] spawn: ${FFMPEG_BIN} ${ffmpegArgs.filter(a => !a.startsWith('http')).join(' ')}`);
+            
             // Now stream the URL through FFmpeg to get PCM audio
             const ffmpeg = spawn(FFMPEG_BIN, ffmpegArgs, {
-                stdio: ['pipe', 'pipe', 'pipe']
+                stdio: ['pipe', 'pipe', 'pipe'],
+                windowsHide: true,
             });
-            
-            // Wait for FFmpeg to start producing data (max 5 seconds)
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('FFmpeg timeout')), 5000);
-                
-                const checkReadable = () => {
-                    if (ffmpeg.stdout.readable && ffmpeg.stdout.readableLength > 0) {
-                        clearTimeout(timeout);
-                        resolve();
-                    }
-                };
-                
-                // Check if already readable
-                checkReadable();
-                
-                ffmpeg.stdout.once('readable', () => {
-                    clearTimeout(timeout);
-                    resolve();
-                });
-                
-                ffmpeg.on('error', (err) => {
-                    clearTimeout(timeout);
-                    reject(err);
-                });
-                
-                ffmpeg.on('close', (code) => {
-                    clearTimeout(timeout);
-                    if (code !== 0) {
-                        reject(new Error(`FFmpeg closed with code ${code}`));
-                    }
-                });
+
+            attachFfmpegLogging(ffmpeg);
+            Logger.info(`[FFMPEG] Started pid=${ffmpeg.pid ?? 'unknown'} for "${queue.currentTrack.title}"`);
+
+            ffmpeg.on('error', (err) => {
+                Logger.error(`[FFMPEG] Process error: ${err.message}`);
             });
-            
-            Logger.info('FFmpeg is producing audio data');
-            
-            // Create audio resource from the ffmpeg output
+
+            // Pipe stdout directly to Discord — do not read/unshift before createAudioResource
             const resource = createAudioResource(ffmpeg.stdout, {
                 inputType: StreamType.Raw,
                 inlineVolume: true,
             });
-            
-            // Store ffmpeg process to kill it later if needed
+
             queue.ffmpeg = ffmpeg;
-            
-            // Set volume
+            queue._playStartedAt = Date.now();
+
             if (resource.volume) {
                 resource.volume.setVolume(queue.volume);
             }
 
-            // Play the resource
             queue.player.play(resource);
             queue.resource = resource;
 
@@ -1165,6 +1189,10 @@ class MusicPlayer {
             this.client.emit('trackStart', queue, queue.currentTrack);
         } catch (error) {
             Logger.error(`[PLAY] Failed to play track: ${error.message}`);
+            if (error.stack) {
+                Logger.debug(`[PLAY] Stack: ${error.stack.split('\n').slice(0, 4).join(' | ')}`);
+            }
+            queue.playing = false;
             // Notify the text channel about the failed track
             if (queue.currentTrack) {
                 this.client.emit('trackError', queue, queue.currentTrack, error);
@@ -1238,8 +1266,11 @@ class MusicPlayer {
                 clearTimeout(timeout);
                 const audioUrl = stdout.trim().split('\n')[0];
                 if (code === 0 && audioUrl) {
+                    Logger.debug(`[STREAM] yt-dlp OK client=${playerClient} url=${truncateUrl(audioUrl)}`);
                     resolve(audioUrl);
                 } else {
+                    const errTail = stderr.trim().slice(-400);
+                    Logger.warn(`[STREAM] yt-dlp failed code=${code} client=${playerClient}${errTail ? ` | ${errTail}` : ''}`);
                     const is403 = stderr.includes('403') || stderr.includes('HTTP Error');
                     // Detect fatal/unrecoverable errors — no point retrying other clients
                     const isUnavailable =
@@ -1256,6 +1287,7 @@ class MusicPlayer {
 
             ytdlp.on('error', (err) => {
                 clearTimeout(timeout);
+                Logger.error(`[STREAM] yt-dlp spawn error (${YTDLP_PATH}): ${err.message}`);
                 reject(err);
             });
         });
@@ -1264,10 +1296,25 @@ class MusicPlayer {
     /**
      * Handle when a track ends
      */
-    handleTrackEnd(queue) {
+    handleTrackEnd(queue, meta = {}) {
         if (!queue) return;
-        
-        Logger.info(`[TRACK_END] Track ended, remaining: ${queue.tracks.length}`);
+
+        const durationMs = meta.durationMs ?? (
+            queue._playStartedAt ? Date.now() - queue._playStartedAt : Infinity
+        );
+
+        Logger.info(`[TRACK_END] Track ended (${durationMs === Infinity ? 'unknown' : durationMs + 'ms'}), remaining: ${queue.tracks.length}`);
+
+        // Stream failed almost immediately — retry once before skipping
+        if (durationMs < 2500 && queue.currentTrack && !queue._streamRetried) {
+            Logger.warn(`[TRACK_END] Premature end (${durationMs}ms), retrying same track once`);
+            queue._streamRetried = true;
+            queue.tracks.unshift(queue.currentTrack);
+            queue.currentTrack = null;
+            setTimeout(() => this.playNext(queue), 400);
+            return;
+        }
+        queue._streamRetried = false;
         
         // Prevent concurrent calls
         if (queue._processingNext) {

@@ -1,6 +1,4 @@
 const { Logger, EmbedFactory } = require('../../utils');
-const config = require('../../config');
-const { checkCommandPremiumRequirements, getPremiumErrorMessage } = require('../../utils/premiumUtils');
 
 module.exports = {
     name: 'interactionCreate',
@@ -12,7 +10,6 @@ module.exports = {
      * @param {Client} client - Discord client
      */
     async execute(interaction, client) {
-        // Only handle chat input commands (slash commands)
         if (!interaction.isChatInputCommand()) return;
 
         const command = client.commands.get(interaction.commandName);
@@ -23,42 +20,6 @@ module.exports = {
         }
 
         try {
-            // ========================================
-            // PREMIUM CHECK
-            // ========================================
-            // Available properties for commands:
-            // 
-            // BY ENTITY:
-            //   UserPrem: true          → Any user premium
-            //   ServPrem: true          → Server premium
-            // 
-            // BY PREMIUM TYPE:
-            //   PremUniversal: true     → Universal premium only
-            //   PremPackCompleto: true  → Complete Pack only
-            //   PremYoutube: true       → YouTube promotion only
-            // 
-            // BY DURATION:
-            //   PremAnual: true         → Annual premium only
-            //   PremPermanente: true    → Permanent premium only
-            //   PremMensual: true       → Monthly premium only
-            // ========================================
-            
-            const premiumCheck = await checkCommandPremiumRequirements(
-                command,
-                interaction.user.id,
-                interaction.guild?.id || null
-            );
-            
-            if (!premiumCheck.allowed) {
-                const errorMessage = getPremiumErrorMessage(premiumCheck.reason, 'en');
-                const embedNo = EmbedFactory.warning('Premium Required', errorMessage);
-                
-                return await interaction.reply({
-                    embeds: [embedNo],
-                    ephemeral: true
-                });
-            }
-
             Logger.command(interaction.commandName, interaction.user.id, interaction.guildId);
             await command.execute(interaction, client);
         } catch (error) {

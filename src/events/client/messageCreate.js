@@ -1,13 +1,10 @@
 const { Logger, EmbedFactory } = require('../../utils');
-const config = require('../../config');
-const chalk = require('chalk');
 
 // Multiple prefixes (case insensitive)
 const PREFIXES = ['!', 'roxy ', 'r '];
 
 // ============ IA MENTION CONFIG ============
-const REQUIRE_PREMIUM = false;        // true = solo premium, false = todos con límite
-const MESSAGES_PER_HOUR = 5;         // Límites por hora si REQUIRE_PREMIUM = false
+const MESSAGES_PER_HOUR = 5;
 // ============================================
 
 // Rate limit ultra liviano (solo memoria)
@@ -44,30 +41,10 @@ function checkRateLimit(userId) {
   return { allowed: true, remaining: MESSAGES_PER_HOUR - userData.count };
 }
 
-// Sistema Premium (lazy load) - usar utilidades locales
-let premiumUtils = null;
-
 // IA Handler (lazy load)
 let callRoxyAI = null;
 
-// ID del bot Roxy para verificación de premium
-const ROXY_BOT_ID = '1308187740092764200';
-
 async function loadDependencies() {
-  if (premiumUtils === null) {
-    try {
-      premiumUtils = require('../../utils/premiumUtils');
-      console.log('[ROXY] Premium utils loaded successfully');
-    } catch (e) {
-      console.error('[ROXY] Error loading premium utils:', e.message);
-      premiumUtils = {
-        checkPremiumAccess: async () => ({ hasPremium: false }),
-        checkUserPremium: async () => ({ hasPremium: false }),
-        checkServerPremium: async () => ({ hasPremium: false })
-      };
-    }
-  }
-  
   if (callRoxyAI === null) {
     try {
       const roxyAI = require('../../handlers/IA/RoxyAI');
@@ -91,31 +68,9 @@ async function handleMention(message, client) {
     return;
   }
 
-  // Verificar premium (usuario O servidor)
-  let hasPremium = false;
-  try {
-    // Usar checkPremiumAccess que verifica usuario Y servidor
-    const premiumResult = await premiumUtils.checkPremiumAccess(message.author.id, message.guild?.id);
-    hasPremium = premiumResult.hasPremium;
-    console.log(`[ROXY IA] Premium check: ${hasPremium ? 'YES' : 'NO'} (source: ${premiumResult.source || 'none'})`);
-  } catch (e) {
-    console.error('[ROXY IA] Error checking premium:', e.message);
-  }
-
-  let canUseIA = false;
-
-  if (hasPremium) {
-    canUseIA = true;
-  } else if (!REQUIRE_PREMIUM) {
-    const rateCheck = checkRateLimit(message.author.id);
-    if (rateCheck.allowed) {
-      canUseIA = true;
-    } else {
-      await message.reply(`❌ Limit reached: **${MESSAGES_PER_HOUR}/hour**. Wait **${rateCheck.minutesLeft}min** or get **Premium**!`);
-      return;
-    }
-  } else {
-    await message.reply("✨ AI chat requires **Premium**. Use `!help` for commands!");
+  const rateCheck = checkRateLimit(message.author.id);
+  if (!rateCheck.allowed) {
+    await message.reply(`❌ Limit reached: **${MESSAGES_PER_HOUR}/hour**. Wait **${rateCheck.minutesLeft}min**.`);
     return;
   }
 
